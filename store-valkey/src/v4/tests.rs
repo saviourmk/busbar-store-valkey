@@ -427,7 +427,7 @@ fn v4_real_server_atomic_receipts_fences_ranges_scans_and_bootstrap() {
         before: Some(1),
     });
     assert_eq!(apply(&mut s, &b, &prepare(timed))[0], b"time");
-    // Range matching uses exact raw length, is atomic, and scrubs the old secret at the same address.
+    // Range matching uses exact raw length, is atomic, and removes the matched keys with their secrets.
     let deleted = prepare(candidate(
         &b,
         6,
@@ -438,7 +438,7 @@ fn v4_real_server_atomic_receipts_fences_ranges_scans_and_bootstrap() {
         }],
     ));
     assert_eq!(apply(&mut s, &b, &deleted)[0], b"applied");
-    assert_eq!(s.get(&record(&base, [7; 16], b"a\0")), Some(vec![0]));
+    assert_eq!(s.get(&record(&base, [7; 16], b"a\0")), None);
     assert_eq!(
         s.get(&record(&base, [7; 16], b"abc")),
         Some(b"\x01other".to_vec())
@@ -502,6 +502,98 @@ fn v4_real_server_atomic_receipts_fences_ranges_scans_and_bootstrap() {
     let mut args = b.commit_args(&reinit, info).unwrap();
     args[3] = format!("{base}o:new:root").into_bytes();
     assert_eq!(s.eval(COMMIT, &args)[0], b"expired");
+}
+
+#[test]
+#[ignore = "launches an isolated real Valkey; set BUSBAR_V4_TEST_TMP and BUSBAR_VALKEY_SERVER"]
+fn v4_real_server_deleted_records_do_not_keep_physical_keys() {
+    let mut s = Server::start();
+    let b = backend();
+    let info = b.info();
+    let base = prefix(info);
+    s.eval(CONNECT, &[persistent(info), base.as_bytes().to_vec()]);
+    assert_eq!(apply(&mut s, &b, &bootstrap(&b))[0], b"applied");
+    let namespace = format!("{}*", record_prefix(&base, [7; 16]));
+    let physical = |s: &mut Server| -> Vec<String> {
+        let mut found: Vec<String> = redis::cmd("KEYS")
+            .arg(&namespace)
+            .query(&mut s.conn)
+            .unwrap();
+        found.sort();
+        found
+    };
+    // Short-lived records such as replay claims: written by one commit, deleted by a later one.
+    for n in 0..100_u8 {
+        let key = [b'c', n];
+        let written = prepare(candidate(&b, 10 + 2 * n, vec![put(&key, b"claim")]));
+        assert_eq!(apply(&mut s, &b, &written)[0], b"applied");
+        let deleted = prepare(candidate(&b, 11 + 2 * n, vec![Mutation::Delete(at(&key))]));
+        let answer = apply(&mut s, &b, &deleted);
+        assert_eq!(answer[0], b"applied");
+        if n == 0 {
+            // A replayed delete answers from its receipt and leaves nothing behind either.
+            assert_eq!(apply(&mut s, &b, &deleted), answer);
+        }
+    }
+    assert_eq!(
+        physical(&mut s),
+        Vec::<String>::new(),
+        "a deleted record must not keep a physical key"
+    );
+    // A commit that puts one key and deletes others keeps only the put; deleting an absent key
+    // writes nothing.
+    let doomed = prepare(candidate(&b, 249, vec![put(b"doomed", b"old secret")]));
+    assert_eq!(apply(&mut s, &b, &doomed)[0], b"applied");
+    let mixed = prepare(candidate(
+        &b,
+        250,
+        vec![
+            Mutation::Delete(at(b"doomed")),
+            put(b"kept", b"kept"),
+            Mutation::Delete(at(b"never written")),
+        ],
+    ));
+    assert_eq!(apply(&mut s, &b, &mixed)[0], b"applied");
+    let kept = record(&base, [7; 16], b"kept");
+    assert_eq!(physical(&mut s), vec![kept.clone()]);
+    assert_eq!(s.get(&kept), Some(b"\x01kept".to_vec()));
+    // An absent key still satisfies an Absent predicate and still fails an Exact one.
+    let mut absent = candidate(&b, 251, vec![put(b"after", b"yes")]);
+    absent.predicates.push(Predicate {
+        address: at(b"c\0"),
+        expected: ExpectedValue::Absent,
+    });
+    assert_eq!(apply(&mut s, &b, &prepare(absent))[0], b"applied");
+    let mut exact = candidate(&b, 252, vec![put(b"never", b"no")]);
+    exact.predicates.push(Predicate {
+        address: at(b"c\0"),
+        expected: ExpectedValue::Exact(Secret::held(b"claim".to_vec())),
+    });
+    assert_eq!(apply(&mut s, &b, &prepare(exact))[0], b"condition");
+    let nsgen = record(&base, control::GENERATION_NAMESPACE.0, &[7; 16]);
+    let scanargs = vec![
+        persistent(info),
+        base.as_bytes().to_vec(),
+        nsgen.into_bytes(),
+        Vec::new(),
+        b"0".to_vec(),
+        Vec::new(),
+        b"100".to_vec(),
+        b"4096".to_vec(),
+        record_prefix(&base, [7; 16]).into_bytes(),
+        Vec::new(),
+        b"0".to_vec(),
+    ];
+    let page = s.eval(SCAN, &scanargs);
+    assert_eq!(page[0], b"page");
+    let mut rows = page[2].as_slice();
+    let mut seen = Vec::new();
+    while !rows.is_empty() {
+        let key = framed(&mut rows).unwrap().to_vec();
+        framed(&mut rows).unwrap();
+        seen.push(key);
+    }
+    assert_eq!(seen, vec![b"after".to_vec(), b"kept".to_vec()]);
 }
 
 #[test]
@@ -696,13 +788,10 @@ fn v4_real_server_legacy_ceiling_range_uses_one_native_mset() {
     ));
     let applied = apply(&mut s, &b, &c);
     assert_eq!(applied[0], b"applied");
-    assert_eq!(
-        s.get(&record(&base, [7; 16], &0_u32.to_be_bytes())),
-        Some(vec![0])
-    );
+    assert_eq!(s.get(&record(&base, [7; 16], &0_u32.to_be_bytes())), None);
     assert_eq!(
         s.get(&record(&base, [7; 16], &(COUNT - 1).to_be_bytes())),
-        Some(vec![0])
+        None
     );
     assert_eq!(apply(&mut s, &b, &c), applied);
     assert_eq!(

@@ -38,8 +38,8 @@ for p=1,np do
     if (e==string.char(0) and old) or (e~=string.char(0) and (not old or e~=string.char(1)..old)) then return {'condition',n} end
 end
 local nm=tonumber(ARGV[i]); i=i+1
-local writes,spaces={},{}
-local function put(k,v) writes[#writes+1]=k; writes[#writes+1]=v end
+local writes,spaces,final={},{},{}
+local function put(k,v) writes[#writes+1]=k; writes[#writes+1]=v; final[k]=v end
 for m=1,nm do
     local kind,k,v,ns=ARGV[i],ARGV[i+1],ARGV[i+2],ARGV[i+3]; i=i+4
     if string.sub(k,1,#ARGV[15])==ARGV[15] then return {'refused'} end
@@ -89,4 +89,10 @@ local function emit(i, ...)
     return emit(i-128,writes[i-127],writes[i-126],writes[i-125],writes[i-124],writes[i-123],writes[i-122],writes[i-121],writes[i-120],writes[i-119],writes[i-118],writes[i-117],writes[i-116],writes[i-115],writes[i-114],writes[i-113],writes[i-112],writes[i-111],writes[i-110],writes[i-109],writes[i-108],writes[i-107],writes[i-106],writes[i-105],writes[i-104],writes[i-103],writes[i-102],writes[i-101],writes[i-100],writes[i-99],writes[i-98],writes[i-97],writes[i-96],writes[i-95],writes[i-94],writes[i-93],writes[i-92],writes[i-91],writes[i-90],writes[i-89],writes[i-88],writes[i-87],writes[i-86],writes[i-85],writes[i-84],writes[i-83],writes[i-82],writes[i-81],writes[i-80],writes[i-79],writes[i-78],writes[i-77],writes[i-76],writes[i-75],writes[i-74],writes[i-73],writes[i-72],writes[i-71],writes[i-70],writes[i-69],writes[i-68],writes[i-67],writes[i-66],writes[i-65],writes[i-64],writes[i-63],writes[i-62],writes[i-61],writes[i-60],writes[i-59],writes[i-58],writes[i-57],writes[i-56],writes[i-55],writes[i-54],writes[i-53],writes[i-52],writes[i-51],writes[i-50],writes[i-49],writes[i-48],writes[i-47],writes[i-46],writes[i-45],writes[i-44],writes[i-43],writes[i-42],writes[i-41],writes[i-40],writes[i-39],writes[i-38],writes[i-37],writes[i-36],writes[i-35],writes[i-34],writes[i-33],writes[i-32],writes[i-31],writes[i-30],writes[i-29],writes[i-28],writes[i-27],writes[i-26],writes[i-25],writes[i-24],writes[i-23],writes[i-22],writes[i-21],writes[i-20],writes[i-19],writes[i-18],writes[i-17],writes[i-16],writes[i-15],writes[i-14],writes[i-13],writes[i-12],writes[i-11],writes[i-10],writes[i-9],writes[i-8],writes[i-7],writes[i-6],writes[i-5],writes[i-4],writes[i-3],writes[i-2],writes[i-1],writes[i-0],...)
 end
 emit(#writes)
+-- The commit is published. A key whose final value is the deletion marker holds
+-- nothing anymore, and live() reads a missing key the same way, so drop it here
+-- instead of keeping a marker forever. An interrupted DEL only leaves markers.
+local gone={}
+for k,v in pairs(final) do if v==string.char(0) then gone[#gone+1]=k end end
+for g=1,#gone,512 do redis.call('DEL',unpack(gone,g,math.min(g+511,#gone))) end
 return {'applied',n,ARGV[13]}
